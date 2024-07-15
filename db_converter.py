@@ -19,7 +19,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s: %(message)s', level=log
 import itertools # repeat
 import concurrent.futures as futures # threading
 
-pauses = ['sil', 'pau', 'SP']
+pauses = ['sil', 'pau', 'SP', 'AP']
 
 # Combined formatter for argparse to show typing and defaults
 class CombinedFormatter(MetavarTypeHelpFormatter, ArgumentDefaultsHelpFormatter):
@@ -106,11 +106,20 @@ class LabelList: # should've been named segment in hindsight...
         lens = [x.length() for x in self.labels]
         return math.fsum(lens)
 
-    def to_phone_string(self): # space separated phonemes
+    def to_phone_string(self, max_sp_length = 1, detect_breaths=False): # space separated phonemes
         phones = []
-        for l in self.labels:
-            p = l.phone.replace('pau', 'SP').replace('sil', 'SP').replace('br', 'AP')
-            phones.append(p)
+        for l in self.labels: 
+            if detect_breaths: # all non-SP and AP pauses are SP
+                p = l.phone.replace('pau', 'SP').replace('sil', 'SP')
+                phones.append(p)
+            else: # old behavior when not using breath detection
+                p = l.phone.replace('sil', 'SP')
+                if p == 'pau':
+                    if l.length() <= max_sp_length:
+                        p = 'SP'
+                    else:
+                        p = 'AP'
+                phones.append(p)
         return ' '.join(phones)
 
     def to_lengths_string(self): # space separated lengths
@@ -119,28 +128,21 @@ class LabelList: # should've been named segment in hindsight...
     def to_phone_nums_string(self, lang): # phoneme separations
         # Find all vowel positions
         vowel_pos = []
-        if self.labels[0].phone not in pauses + lang['vowels'] + ['br', 'AP']:
+        if self.labels[0].phone not in pauses + lang['vowels']:
             vowel_pos.append(0)
 
         for i in range(len(self.labels)):
             l = self.labels[i]
             if l.phone in lang['vowels']:
                 prev_l = self.labels[i-1]
-                if prev_l.phone in lang['liquids'].keys(): # check liquids before vowel.
-                    # if the value for the liquid is true, move position for any consonant, else, move position for specified consonants.
-                    liquid = lang['liquids'][prev_l.phone]
-                    if liquid == True:
-                        if self.labels[i-2].phone not in pauses + lang['vowels']:
-                            vowel_pos.append(i-1)
-                        else:
-                            vowel_pos.append(i)
-                    elif self.labels[i-2].phone in liquid:
+                if prev_l.phone in lang['liquids']: # check liquids before vowel. move position if liquid with consonant before is found
+                    if self.labels[i-2].phone not in lang['vowels']:
                         vowel_pos.append(i-1)
                     else:
                         vowel_pos.append(i)
                 else:
                     vowel_pos.append(i)
-            elif l.phone in pauses + ['br', 'AP']:
+            elif l.phone in pauses:
                 vowel_pos.append(i)
         vowel_pos.append(len(self))
 
@@ -615,7 +617,7 @@ def process_lab_wav_pair(segment_loc, lab, wav, args, lang=None):
 
         transcript_row = {
             'name' : segment_name,
-            'ph_seq' : segment.to_phone_string(),
+            'ph_seq' : segment.to_phone_string(max_sp_length=args.max_sp_length, detect_breaths=args.detect_breaths),
             'ph_dur' : segment.to_lengths_string()
             }
 
@@ -634,10 +636,10 @@ def process_lab_wav_pair(segment_loc, lab, wav, args, lang=None):
                 transcript_row['note_seq'] = note_seq
                 transcript_row['note_dur'] = note_dur
 
-        all_pau = np.all(np.fromiter(map(lambda x : x in ['SP', 'AP'], transcript_row['ph_seq'].split()), bool))
+        all_pau = np.all(np.array(list(map(lambda x : x in pauses, transcript_row['ph_seq'].split()))))
         all_rest = False
         if args.estimate_midi:
-            all_rest = np.all(np.fromiter(map(lambda x : x == 'rest', transcript_row['note_seq'].split()), bool))
+            all_rest = np.all(np.array(list(map(lambda x : x == 'rest', transcript_row['note_seq'].split()))))
 
         if not (all_pau or all_rest):
             sf.write(segment_loc / (segment_name + '.wav'), segment_wav, fs)
@@ -659,32 +661,29 @@ if __name__ == '__main__':
     try:
         parser = ArgumentParser(description='Converts a database with mono labels (NNSVS Format) into the DiffSinger format and saves it in a new folder in the path supplemented.', formatter_class=CombinedFormatter)
         parser.add_argument('path', type=str, metavar='path', help='The path of the folder of the database.')
+        parser.add_argument('--max-length', '-l', type=float, default=15, help='The maximum length of the samples in seconds.')
+        parser.add_argument('--max-length-relaxation-factor', '-R', type=float, default=0.1, help='This length in seconds will be continuously added to the maximum length for segments that are too long for the maximum length to cut.')
+        parser.add_argument('--max-silences', '-s', type=int, default=0, help='The maximum amount of silences (pau) in the middle of each segment. Set to a big amount to maximize segment lengths.')
+        parser.add_argument('--max-sp-length', '-S', type=float, default=0.5, help='The maximum length for silences (pau) to turn into SP. Ignored when breath detection is enabled. Only here for fallback.')
+        parser.add_argument('--audio-sample-rate', '-r', type=int, default=44100, help='The sampling rate in Hz to put the audio files in. If the sampling rates do not match it will be converted to the specified sampling rate. Enter 0 to ignore sample rates.')
+        parser.add_argument('--language-def', '-L', type=str, metavar='path', help='The path of the language definition .json file. If present, phoneme numbers will be added.')
+        parser.add_argument('--estimate-midi', '-m', action='store_true', help='Whether to estimate MIDI or not. Only works if a language definition is added for note splitting.')
+        parser.add_argument('--use-cents', '-c', action='store_true', help='Add cent offsets for MIDI estimation.')
+        parser.add_argument('--pitch-extractor', '-p', type=str, metavar='parselmouth | harvest', default='parselmouth', help='Pitch extractor used for MIDI estimation. Only parselmouth reads voicing-threshold-midi.')
+        parser.add_argument('--time-step', '-t', type=float, default=0.005, help='The time step used for all frame-by-frame analysis functions.')
+        parser.add_argument('--f0-min', '-f', type=float, default=40, help='The minimum F0 to detect in Hz. Used in MIDI estimation and breath detection.')
+        parser.add_argument('--f0-max', '-F', type=float, default=1100, help='The maximum F0 to detect in Hz. Used in MIDI estimation and breath detection.')
+        parser.add_argument('--voicing-threshold-midi', '-V', type=float, default=0.45, help='The voicing threshold used for MIDI estimation.')
+        parser.add_argument('--detect-breaths', '-B', action='store_true', help='Detect breaths within all pauses.')
+        parser.add_argument('--voicing-threshold-breath', '-v', type=float, default=0.6, help='The voicing threshold used for breath detection.')
+        parser.add_argument('--breath-window-size', '-W', type=float, default=0.05, help='The size of the window in seconds for breath detection.')
+        parser.add_argument('--breath-min-length', '-b', type=float, default=0.1    , help='The minimum length of a breath in seconds.')
+        parser.add_argument('--breath-db-threshold', '-e', type=float, default=-60, help='The threshold in the RMS of the signal in dB to detect a breath.')
+        parser.add_argument('--breath-centroid-threshold', '-C', type=float, default=2000, help='The threshold in the spectral centroid of the signal in Hz to detect a breath.')
+        parser.add_argument('--write-ds', '-D', action='store_true', help='Write .ds files for usage with SlurCutter or for preprocessing.')
+        parser.add_argument('--write-labels', '-w', type=str, metavar='htk | aud', help='Write labels if you want to check segmentation labels. "htk" gives HTK style labels, "aud" gives Audacity style labels.')
         parser.add_argument('--num-processes', '-T', type=int, default=1, help='Number of processes to run for faster segmentation. Enter 0 to use all cores.')
         parser.add_argument('--debug', '-d', action='store_true', help='Show debug logs.')
-        segmenting_group = parser.add_argument_group(title='segmentation options', description='Options related to segmentation.')
-        segmenting_group.add_argument('--max-length', '-l', type=float, default=15, help='The maximum length of the samples in seconds.')
-        segmenting_group.add_argument('--max-length-relaxation-factor', '-R', type=float, default=0.1, help='This length in seconds will be continuously added to the maximum length for segments that are too long for the maximum length to cut.')
-        segmenting_group.add_argument('--max-silences', '-s', type=int, default=0, help='The maximum amount of silences (pau) in the middle of each segment. Set to a big amount to maximize segment lengths.')
-        segmenting_group.add_argument('--audio-sample-rate', '-r', type=int, default=44100, help='The sampling rate in Hz to put the audio files in. If the sampling rates do not match it will be converted to the specified sampling rate. Enter 0 to ignore sample rates.')
-        midi_estimation_group = parser.add_argument_group('MIDI estimation options', description='Options related to MIDI Estimation. MIDI estimation requires a language definition.')
-        midi_estimation_group.add_argument('--language-def', '-L', type=str, metavar='path', help='The path of the language definition .json file. If present, phoneme numbers will be added.')
-        midi_estimation_group.add_argument('--estimate-midi', '-m', action='store_true', help='Whether to estimate MIDI or not. Only works if a language definition is added for note splitting.')
-        midi_estimation_group.add_argument('--use-cents', '-c', action='store_true', help='Add cent offsets for MIDI estimation.')
-        midi_estimation_group.add_argument('--pitch-extractor', '-p', type=str, metavar='parselmouth | harvest', default='parselmouth', help='Pitch extractor used for MIDI estimation. Only parselmouth reads voicing-threshold-midi.')
-        midi_estimation_group.add_argument('--time-step', '-t', type=float, default=0.005, help='The time step used for all frame-by-frame analysis functions.')
-        midi_estimation_group.add_argument('--f0-min', '-f', type=float, default=40, help='The minimum F0 to detect in Hz. Used in MIDI estimation and breath detection.')
-        midi_estimation_group.add_argument('--f0-max', '-F', type=float, default=1100, help='The maximum F0 to detect in Hz. Used in MIDI estimation and breath detection.')
-        midi_estimation_group.add_argument('--voicing-threshold-midi', '-V', type=float, default=0.45, help='The voicing threshold used for MIDI estimation.')
-        breath_detection_group = parser.add_argument_group(title='breath detection options', description='Options for breath detection. Enabled with --detect-breaths.')
-        breath_detection_group.add_argument('--detect-breaths', '-B', action='store_true', help='Detect breaths within all pauses.')
-        breath_detection_group.add_argument('--voicing-threshold-breath', '-v', type=float, default=0.6, help='The voicing threshold used for breath detection.')
-        breath_detection_group.add_argument('--breath-window-size', '-W', type=float, default=0.05, help='The size of the window in seconds for breath detection.')
-        breath_detection_group.add_argument('--breath-min-length', '-b', type=float, default=0.1, help='The minimum length of a breath in seconds.')
-        breath_detection_group.add_argument('--breath-db-threshold', '-e', type=float, default=-60, help='The threshold in the RMS of the signal in dB to detect a breath.')
-        breath_detection_group.add_argument('--breath-centroid-threshold', '-C', type=float, default=2000, help='The threshold in the spectral centroid of the signal in Hz to detect a breath.')
-        outputs_group = parser.add_argument_group('output options', description='Options related to output DiffSinger database.')
-        outputs_group.add_argument('--write-ds', '-D', action='store_true', help='Write .ds files for usage with SlurCutter or for preprocessing.')
-        outputs_group.add_argument('--write-labels', '-w', type=str, metavar='htk | aud', help='Write labels if you want to check segmentation labels. "htk" gives HTK style labels, "aud" gives Audacity style labels.')
         
         args, _ = parser.parse_known_args()
         if args.debug:
@@ -721,8 +720,6 @@ if __name__ == '__main__':
         if args.language_def:
             with open(args.language_def) as f:
                 lang = json.load(f)
-            if isinstance(lang['liquids'], list): # support for old lang spec
-                lang['liquids'] = {x : True for x in lang['liquids']}
             transcript_header.append('ph_num')
 
         if args.estimate_midi:

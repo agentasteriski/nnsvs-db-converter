@@ -1,7 +1,36 @@
 {
-    "vowels" : ["a", "i", "u", "e", "o", "N", "A", "I", "U", "E", "O"],
-    "liquids" : {
-        "w" : ["k", "g"],
-        "y" : true
+    "vowels": [
+        "N",
+        "a",
+        "aa",
+        "ae",
+        "ah",
+        "ao",
+        "ax",
+        "axh",
+        "ay",
+        "e",
+        "eh",
+        "er",
+        "exh",
+        "ey",
+        "i",
+        "ih",
+        "ixh",
+        "iy",
+        "o",
+        "ow",
+        "oxh",
+        "u",
+        "uh",
+        "uw"
+    ],
+    "liquids": {
+        "l": true,
+        "r": true,
+        "rx": true,
+        "ry": true,
+        "w": true,
+        "y": true
     }
 }
