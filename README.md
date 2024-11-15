@@ -1,3 +1,4 @@
+## fork note: main is more or less the current version split to avoid stealth updates for difftrainer users, archive and branch2 are old versions
 # nnsvs-db-converter
  Python script to convert NNSVS DBs to DiffSinger without needing the NNSVS Python Library.
 # Information
